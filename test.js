@@ -1,11 +1,22 @@
-let Store = require('./component/struct.js');
+let Store = require('./component/store.js');
 
-let s = new Store();
+let s = new Store('./data/test');
 
-s.struct('_main_', {
-  id: 'int32',
-  age: 'int8'
+console.log(s.build);
+
+s.define('vector2', {
+  x: 'float',
+  y: 'float'
 });
-s.build();
+s.define('_main_', {
+  locations: 'vector2[10]'
+});
+s.build('_main_');
 
-console.log(s.structs[12]);
+// s.get(['locations', 4])
+//   .then((res)=>{
+//     console.log(res);
+//   })
+//   .catch((e)=>{
+//     console.error(e);
+//   })
