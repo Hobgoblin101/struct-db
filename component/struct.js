@@ -30,6 +30,24 @@ Buffer.prototype.replace = function(buff, offset=0, length=NaN){
 
   return this;
 }
+/**
+ * Segment the buffer into parts
+ * @param {number} interval 
+ */
+Buffer.prototype.split = function(interval){
+  let len = Math.ceil(this.length/interval);
+  let arr = new Array(len);
+  let ptr = 0;
+
+  for (let i=0; i<len; i++){
+    let nx = ptr + interval;
+    arr.push(this.slice(ptr, nx));
+
+    ptr = nx;
+  }
+
+  return arr;
+}
 
 
 
@@ -57,8 +75,8 @@ class Attribute{
       case 'int16':
         this.size = 2;
         break;
-      case 'int32':
-        this.size = 4;
+      case 'int':
+        this.size = 6;
         break;
       case 'int64':
         this.size = 8;
@@ -72,7 +90,7 @@ class Attribute{
       case 'uint32':
         this.size = 4;
         break;
-      case 'uint64':
+      case 'uint':
         this.size = 6;
         break;
     }
@@ -82,7 +100,7 @@ class Attribute{
    * Encode the data to a buffer according to Attribute's type
    * @param {any} data 
    */
-  encode(data){
+  async encode(data){
     let buff = new Buffer(this.size);
   
     switch(this.type){
@@ -137,10 +155,10 @@ class Attribute{
   
     switch(this.type){
       case 'double':
-        data = buff.readDoubleLE(0);
+        data = buff.readDoubleLE(0, this.size);
         break;
       case 'float':
-        data = buff.readFloatLE(0);
+        data = buff.readFloatLE(0, this.size);
         break;
       case 'boolean':
         if (buff[0] === 0){
@@ -150,28 +168,28 @@ class Attribute{
         }
         break;
       case 'int8':
-        data = buff.readInt8(0);
+        data = buff.readInt8(0, this.size);
         break;
       case 'int16':
-        data = buff.readInt16LE(0);
+        data = buff.readInt16LE(0, this.size);
         break;
       case 'int32':
-        data = buff.readInt32LE(0);
+        data = buff.readInt32LE(0, this.size);
         break;
       case 'int64':
-        data = buff.readIntLE(0);
+        data = buff.readIntLE(0, this.size);
         break;
       case 'uint8':
-        data = buff.readUInt8(0);
+        data = buff.readUInt8(0, this.size);
         break;
       case 'uint16':
-        data = buff.readUInt16LE(0);
+        data = buff.readUInt16LE(0, this.size);
         break;
       case 'uint32':
-        data = buff.readUInt32LE(0);
+        data = buff.readUInt32LE(0, this.size);
         break;
       case 'uint64':
-        data = buff.readUIntLE(0);
+        data = buff.readUIntLE(0, this.size);
         break;
     }
   
@@ -197,19 +215,33 @@ class Attribute{
    * @param {number} ptr 
    */
   read(ptr){
-    let self = this;
-
     return new Promise((res)=>{
-      let s = fs.createReadStream(self.parent.path, {
+      let s = fs.createReadStream(this.parent.path, {
         start: ptr,
-        end: ptr+self.size,
-        highWaterMark: self.size
+        end: ptr+this.size,
+        highWaterMark: this.size
       });
       s.on('data', (c)=>{
         res(c);
         
         s.close();
       });
+    });
+  }
+
+  /**
+   * Write the buffer content
+   * @param {number} ptr 
+   * @param {any} data 
+   */
+  write(ptr, data){
+    return new Promise(async (res)=>{
+      let s = fs.createWriteStream(this.parent.path, {
+        start: ptr,
+        flags: 'r+'
+      })
+      s.on('close', res);
+      s.end(await this.encode(data));
     });
   }
 }
@@ -219,18 +251,15 @@ class Attribute{
 
 
 class AttrArray{
-  constructor(parent, struct, length){
+  constructor(parent, struct, length, fixed){
     this.parent = parent;
     this.struct = struct;
-    this.fixed = true;
+    this.length = length;
+    this.fixed = fixed;
 
-    if (length == 0){
-      this.size = struct.size * length + 8;
-      this.fixed = false;
-      this.length = 128;
-    }else{
-      this.size = length * struct.size;
-      this.length = length;
+    this.size = this.struct.size * this.length;
+    if (!fixed){ // Add trailing chain link
+      this.size += 8;
     }
   }
 
@@ -240,33 +269,31 @@ class AttrArray{
    * @returns {Promise}
    */
   decode(buffer){
-    let self = this;
-
     return new Promise(async (resolve, reject)=>{
       let res = [];
       let i=0;
 
       //Decode the given data
       let s = 0;
-      let e = self.struct.length;
-      for (i=0; i<self.length; i++){
-        res.push(await self.struct.decode(buffer.slice(s, e)));
+      let e = this.struct.length;
+      for (i=0; i<this.length; i++){
+        res.push(await this.struct.decode(buffer.slice(s, e)));
 
         s = e;
-        e += self.struct.length;
+        e += this.struct.length;
       }
 
       // If there is more data then read that too
-      if (!self.fixed){
+      if (!this.fixed){
         let offset = buffer.slice(-6).readUIntLE();
 
         let loop = function(){
           i=0;
 
-          let stream = fs.createReadStream(self.parent, {
+          let stream = fs.createReadStream(this.parent, {
             start: offset,
-            end: self.size,
-            highWaterMark: self.struct.size
+            end: this.size,
+            highWaterMark: this.struct.size
           })
           stream.on('data', async(chunk)=>{
             if (i > this.length){
@@ -282,7 +309,7 @@ class AttrArray{
               return;
             }
 
-            res.push(await self.struct.decode(chunk));
+            res.push(await this.struct.decode(chunk));
             i++;
           })
         }
@@ -299,31 +326,31 @@ class AttrArray{
    * @param {number[]} path 
    * @param {number} offset 
    */
-  trace(path, offset=0){
-    return new Promise((resolve, reject)=>{
+  trace(path, offset=0, writing=false){
+    return new Promise(async (res)=>{
       if (this.fixed){
         offset += this.struct.size * path[0];
 
         if (path.length === 0){
-          resolve(path.slice(1), offset);
+          res(path.slice(1), offset);
           return;
         }
 
-        resolve(this.struct.trace(path.slice(1), offset));
+        res(await this.struct.trace(path.slice(1), offset, writing));
         return;
       }
 
       let i = path[0];
-      let loop = ()=>{
+      let loop = async ()=>{
         if (i < this.length){
           offset += this.struct.size * i;
 
           if (path.length === 0){
-            resolve(offset);
+            res(offset);
             return;
           }
 
-          resolve(this.struct(path.slice(1), offset));
+          res(await this.struct.trace(path.slice(1), offset, writing));
           return;
         }
 
@@ -334,17 +361,27 @@ class AttrArray{
           start: ptr,
           end: ptr + 8,
           highWaterMark: 8
-        });
-        s.on('data', function(b){
-          offset = b.readIntLE(0, 8);
-          if (offset === 0){ //Invalid Pointer
-            resolve(new ReferenceError(`Index out of rage`));
-            s.close();
+        }).on('data', (b)=>{
+          let nx = b.readUIntLE(0, 8);
+          s.close(); // Close the filesystem handle
+
+          if (nx === 0){ //Invalid Pointer
+            if (!writing){
+              throw new ReferenceError(`Index out of range`);
+              return;
+            }
+
+            // Since the trace is for a write cycle, expand the array
+            this.extend(offset, (nx)=>{
+              offset = nx;
+              loop();
+            });
+
             return;
           }
 
+          offset = nx;
           loop();
-          s.close();
         });
       };
       loop();
@@ -356,14 +393,12 @@ class AttrArray{
    * @param {number} ptr 
    */
   read(ptr){
-    let self = this;
-
     return new Promise((res)=>{
-      if (self.fixed){
-        let s = fs.createReadStream(self.parent.path, {
+      if (this.fixed){
+        let s = fs.createReadStream(this.parent.path, {
           start: ptr,
-          end: ptr+self.size-8,
-          highWaterMark: self.size-8
+          end: ptr+this.size-8,
+          highWaterMark: this.size-8
         });
         s.on('data', (c)=>{
           res(c);
@@ -375,13 +410,13 @@ class AttrArray{
 
       let data;
       let loop = ()=>{
-        let s = fs.createReadStream(self.parent.path, {
+        let s = fs.createReadStream(this.parent.path, {
           start: ptr,
-          end: ptr+self.size,
-          highWaterMark: self.size
+          end: ptr+this.size,
+          highWaterMark: this.size
         });
         s.on('data', (c)=>{
-          ptr = c.slice(-8).readIntLE(0,8);
+          ptr = c.slice(-8).readUIntLE(0,8);
           data.concat([data, c.slice(0, -8)]);
 
           if (ptr == 0){
@@ -394,6 +429,113 @@ class AttrArray{
         })
       }
     })
+  }
+
+  /**
+   * Write the data to store
+   * @param {Number} ptr 
+   * @param {any[]} data 
+   */
+  write(ptr, data){
+    return new Promise((res)=>{
+ 
+      if (!this.fixed){ // Just write the single chain
+        let s = fs.createWriteStream(this.parent.path, {
+          start: ptr,
+          end: ptr+this.size,
+          flags: 'r+'
+        })
+        s.on('close', res);
+        s.end(data.slice(0, this.size));
+        
+        return;
+      }
+
+      let interval = this.length*this.struct.size;
+      data = this.encode(data).split(interval);
+      let loop = (i)=>{
+        let t = ptr + interval;
+
+        // Write the chain data
+        let s = fs.createWriteStream(this.parent.path, {
+          start: ptr,
+          flags: 'r+',
+        });
+        s.on('close', ()=>{
+
+          // Read the trailing pointer
+          let s = fs.createWriteStream(this.parent.path, {
+            start: t,
+            end: t+8,
+            flags: 'r+',
+            highWaterMark: 8
+          }).on('data', (c)=>{
+            s.close(); // Close the read handle
+
+            // Decode the trailing pointer
+            ptr = c.readUIntLE(0, 8);
+  
+            if (i+1 === data.length){ // If there is no more data
+              res();
+              return;
+            }
+  
+            if (ptr < 1){ //Not another chain link, but more data
+              self.extend().then((nx)=>{ // Extend the chain
+                ptr = nx;
+                loop(i+1);
+              });
+
+              return;
+            }
+
+            loop(i+1);
+          });
+
+        });
+        s.end(data[i]);
+      }
+
+      // Initilize the loop
+      loop(0);
+    });
+  }
+
+  /**
+   * Create a new chain for the array
+   * @param {Number} ptr 
+   */
+  extend(ptr){
+    return new Promise((res)=>{
+      if (this.fixed){
+        throw new TypeError(`Cannot extend a fixed`);
+      }
+
+      let nx = this.parent.size;
+      this.parent.size += this.size;
+
+      // Write a new blank chain
+      fs.appendFile(this.parent.path, Buffer(this.size), (e)=>{
+        if (e){
+          throw e;
+        }
+
+        // Make the reference
+        ptr += this.length * this.struct.size;
+        let b = Buffer(8);
+        b.writeUIntLE(nx, 0, 8);
+
+        // Write the refernces
+        let s = fs.createWriteStream(this.parent.path, {
+          start: ptr,
+          flags: 'r+'
+        });
+        s.on('close', ()=>{
+          res(nx);
+        });
+        s.end(b);
+      });
+    });
   }
 }
 
@@ -421,20 +563,42 @@ class Struct{
     for (let key in info){
       let type = info[key];
       let isArray = false;
+      let fixed = false;
       let length = 0;
 
+      // Type is array, and get it's info
       if (type[type.length-1] == ']'){
         let i = info[key].indexOf('[');
 
-        length = parseInt(info[key].slice(i+1, -1)) || 0;
+        length = info[key].slice(i+1, -1);
         type = info[key].slice(0, i);
         isArray = true;
+
+        // Check if the array is of unfixed size, and if so what sizing
+        if (length.length == 0){        // Use Default chain size
+          length = 50;
+          fixed = false;
+        }else if (length[0] === '~'){   // Use custom chain size
+          fixed = false;
+          length = parseInt(length.slice(1));
+        }else{                          // Use fixed array length
+          fixed = true;
+          length = parseInt(length);
+        }
+
+        // Check that the given length is valid
+        if (isNaN(length)){
+          throw new TypeError(`Invalid Array Length ${info}`);
+        }
       }
 
       for (let struct of this.parent.struct){
         if(struct.type == type){
           if (isArray){
-            this.attr[i] = new AttrArray(this.parent, struct, length);
+            let j = this.parent.struct.length;
+            this.parent.struct[j] = new AttrArray(this.parent, struct, length, fixed);
+
+            this.attr[i] = this.parent.struct[j];
             this.name[i] = key;
 
             this.size += this.attr[i].size;
@@ -461,20 +625,20 @@ class Struct{
    * @param {number[]} path 
    * @param {number} offset 
    */
-  async trace(path, offset=0){
+  async trace(path, offset=0, writing=false){
     if (path.length == 0){
       return offset;
     }
 
     for (let j=0; j<path[0]; j++){
       if (!this.attr[j]){
-        return new ReferenceError(`${this.type}: Missing attribute ${j}.\n\tRemaining path: ${path},\n\toffset: ${offset}`);
+        throw new ReferenceError(`${this.type}: Missing attribute ${j}.\n\tRemaining path: ${path},\n\toffset: ${offset}`);
       }
 
       offset += this.attr[j].size;
     }
 
-    return await this.attr[path[0]].trace(path.slice(1), offset);
+    return await this.attr[path[0]].trace(path.slice(1), offset, writing);
   }
 
   /**
@@ -483,8 +647,6 @@ class Struct{
    * @returns {Promise}
    */
   read(ptr){
-    let self = this;
-
     return new Promise((res)=>{
       let s = fs.createReadStream(this.parent.path, {
         start: ptr,
@@ -492,8 +654,8 @@ class Struct{
         highWaterMark: this.size
       });
       s.on('data', function(c){
-        if (c.length < self.size){
-          throw new ReferenceError(`Read failed, invalid index?\n\t${ptr}-${ptr+self.size}`);
+        if (c.length < this.size){
+          throw new ReferenceError(`Read failed, invalid index?\n\t${ptr}-${ptr+this.size}`);
           s.close();
           return;
         }
@@ -503,17 +665,40 @@ class Struct{
       });
     })
   }
-}
 
+  /**
+   * Write the object
+   * @param {number} ptr 
+   * @param {number} data 
+   */
+  write(ptr, data){
+    return new Promise(async (res)=>{
+      let w = 0;
 
+      let fin = ()=>{
+        w -= 1;
 
+        // If there are no attributes currently being written, then it must be the end
+        if (w === 0){
+          res();
+        }
+      }
 
+      for (let i=0; i<this.name.length; i++){
+        if (data[name]){
+          this.attr[name].write( ptr, await this.attr[name].encode(data[name]) ).then(fin);
+          w += 1;
+        }
 
-class Cache{
-  constructor(){
-    this.list = [];
+        ptr += this.attr[name].size;
+      }
+    });
   }
 }
+
+
+
+
 
 class Store{
   constructor(path){
@@ -532,7 +717,6 @@ class Store{
       new Attribute(this,'string'),
       new Attribute(this,'blob')
     ];
-    this.cache = new Cache();
 
     this.root = null;
     this.size = 0;
@@ -574,7 +758,7 @@ class Store{
 
     fs.writeFileSync(this.path, Buffer(this.size));
     Object.preventExtensions(this);
-    Object.freeze(this);
+    Object.freeze(this.struct);
   }
 
   /**
@@ -602,7 +786,7 @@ class Store{
         path[i] = parseInt(path[i]);
 
         if (ref.fixed && ref.length <= path[i]){
-          return new ReferenceError(`Invalid Path, index out of range ${origin}, failed at ${i}`);
+          throw new ReferenceError(`Invalid Path, index out of range ${origin}, failed at ${i}`);
         }
 
         ref = ref.struct;
@@ -611,7 +795,7 @@ class Store{
 
       // Check if it is a valid structure
       if (!ref.attr){
-        return new ReferenceError(`Invalid Path ${origin}, failed at ${i}\n\t`, ref);
+        throw new ReferenceError(`Invalid Path ${origin}, failed at ${i}\n\t`, ref);
       }
 
       // Find the id of the element
@@ -624,7 +808,7 @@ class Store{
         }
       }
 
-      return new ReferenceError(`Invalid path ${origin}, failed at ${i}`)
+      throw new ReferenceError(`Invalid path ${origin}, failed at ${i}`)
     }
 
     return path;
@@ -635,15 +819,20 @@ class Store{
    * @param {string} path 
    * @returns {Promise}
    */
-  async trace(path){
+  async trace(path, writing=false){
     if (!Array.isArray(path)){
       path = this.compilePath(path);
     }
 
-    return await this.root.trace(path, 0);
+    return await this.root.trace(path, 0, writing);
   }
 
-  async read(path, ref){
+  /**
+   * Get the object's data
+   * @param {String} path 
+   * @param {Struct=} ref 
+   */
+  async get(path, ref){
     if (!Array.isArray(path)){
       path = this.compilePath(path);
     }
@@ -661,7 +850,34 @@ class Store{
       }
     }
 
-    return await ref.read(ptr);
+    return await ref.decode( await ref.read(ptr) );
+  }
+
+  /**
+   * Write the object's data
+   * @param {String} path 
+   * @param {Any} data to be written
+   * @param {Struct=} ref 
+   */
+  async set(path, data, ref){
+    if (!Array.isArray(path)){
+      path = this.compilePath(path);
+    }
+
+    if (!ref){
+      ref = this.root;
+      for (let i=0; i<path.length; i++){
+        if (ref.struct){
+          ref = ref.struct;
+          continue;
+        }
+
+        ref = ref.attr[path[i]];
+      }
+    }
+    let ptr = await this.trace(path, true);
+
+    return await ref.write(ptr, await ref.encode(data));
   }
 }
 

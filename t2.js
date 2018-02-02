@@ -7,18 +7,17 @@ s.define('vector2', {
   y: 'float'
 });
 s.define('_main_', {
-  locations: 'vector2[10]'
+  location: 'vector2[~2]'
 });
 s.compile('_main_');
 s.init();
 
+// s.struct[13].extend(0);
+s.set('location.3.x', 0.25).then((e)=>{
+  console.log('size', s.size);
 
-
-
-
-s.read('locations.0').then((res)=>{
-  console.log('res', res);
-})
-.catch((e)=>{
-  console.error(e);
-})
+  s.get('location.3.x')
+    .then((data)=>{
+      console.log(data);
+    })
+});
